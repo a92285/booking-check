@@ -42,7 +42,7 @@ def init_db():
             user_id TEXT NOT NULL,
             hotel_url TEXT NOT NULL,
             checkin_date TEXT NOT NULL,
-            checkout_date TEXT,
+            checkout_date TEXT NOT NULL,
             guests INTEGER NOT NULL,
             room_type TEXT NOT NULL,
             is_active INTEGER DEFAULT 1,
@@ -58,7 +58,7 @@ user_states = {}
 class BookingSession:
     def __init__(self, user_id):
         self.user_id = user_id
-        self.step = 0  # 0: 等待URL, 1: 等待入住時間, 2: 等待人數, 3: 等待房型
+        self.step = 0  # 0: 等待URL, 1: 等待入住時間, 2: 等待退房時間, 3: 等待人數, 4: 等待房型
         self.hotel_url = None
         self.checkin_date = None
         self.checkout_date = None
@@ -104,8 +104,44 @@ def cancel_user_booking(user_id, booking_id):
     conn.close()
     return rows_affected > 0
 
+def get_hotel_name_from_url(url):
+    """從網址中提取飯店名稱或簡化顯示"""
+    try:
+        # 嘗試從 URL 中提取有用的部分
+        if 'booking.com' in url:
+            # 從 booking.com URL 中提取飯店名稱
+            parts = url.split('/')
+            for part in parts:
+                if 'hotel' in part and len(part) > 5:
+                    # 替換連字符為空格，首字母大寫
+                    hotel_name = part.replace('-', ' ').title()
+                    return f"Booking.com - {hotel_name[:20]}"
+        
+        # 如果是其他網站或無法解析，顯示域名
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netlify or parsed.hostname or 'Unknown'
+        
+        # 移除 www. 前綴
+        if domain.startswith('www.'):
+            domain = domain[4:]
+            
+        return f"{domain[:25]}"
+        
+    except:
+        # 如果解析失敗，返回截斷的 URL
+        return url[:35] + "..." if len(url) > 35 else url
+    """計算住宿天數"""
+    try:
+        checkin = datetime.strptime(checkin_date, '%Y-%m-%d')
+        checkout = datetime.strptime(checkout_date, '%Y-%m-%d')
+        nights = (checkout - checkin).days
+        return nights
+    except:
+        return 0
+
 # 簡化的空房檢查 (模擬功能)
-def check_hotel_availability(hotel_url, checkin_date, guests, room_type):
+def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, room_type):
     """
     簡化版的空房檢查
     在實際應用中，這裡會使用 Selenium 爬蟲或 API 來檢查真實的空房狀況
@@ -116,13 +152,15 @@ def check_hotel_availability(hotel_url, checkin_date, guests, room_type):
         import random
         time.sleep(2)  # 模擬網路請求時間
         
+        nights = calculate_nights(checkin_date, checkout_date)
+        
         # 30% 機率有空房 (用於測試)
-        has_availability = True
+        has_availability = random.random() < 0.3
         
         if has_availability:
-            return True, f"找到空房：{room_type} 可預訂！"
+            return True, f"找到空房：{room_type} 可預訂！({nights}晚住宿)"
         else:
-            return False, "目前無空房"
+            return False, f"目前無空房 ({nights}晚住宿)"
             
     except Exception as e:
         logger.error(f"檢查空房時發生錯誤: {e}")
@@ -164,8 +202,9 @@ def handle_message(event):
 📝 設定查詢：
 1️⃣ 輸入飯店預訂網址
 2️⃣ 輸入入住日期 (YYYY-MM-DD)
-3️⃣ 輸入住宿人數
-4️⃣ 輸入房型名稱
+3️⃣ 輸入退房日期 (YYYY-MM-DD)
+4️⃣ 輸入住宿人數
+5️⃣ 輸入房型名稱
 
 🔧 指令：
 • 開始 - 開始新的查詢設定
@@ -185,9 +224,12 @@ def handle_message(event):
         else:
             reply_message = "📋 您目前的空房監控：\n\n"
             for i, booking in enumerate(bookings, 1):
-                booking_id, _, hotel_url, checkin_date, _, guests, room_type, _, created_at = booking
-                reply_message += f"{i}. 🏨 {hotel_url[:30]}...\n"
-                reply_message += f"   📅 {checkin_date} | 👥 {guests}人 | 🛏️ {room_type}\n\n"
+                booking_id, _, hotel_url, checkin_date, checkout_date, guests, room_type, _, created_at = booking
+                nights = calculate_nights(checkin_date, checkout_date)
+                hotel_display = get_hotel_name_from_url(hotel_url)
+                reply_message += f"{i}. 🏨 {hotel_display}\n"
+                reply_message += f"   📅 {checkin_date} ~ {checkout_date} ({nights}晚)\n"
+                reply_message += f"   👥 {guests}人 | 🛏️ {room_type}\n\n"
             reply_message += "輸入「開始」設定新的查詢"
         
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
@@ -223,33 +265,54 @@ def handle_message(event):
             else:
                 session.checkin_date = message_text
                 session.step = 2
-                reply_message = f"✅ 已設定入住時間：{message_text}\n\n👥 請輸入住宿人數："
+                reply_message = f"✅ 已設定入住時間：{message_text}\n\n📅 請輸入退房時間（格式：YYYY-MM-DD）\n例如：2024-12-27"
         except ValueError:
             reply_message = "❌ 日期格式錯誤，請使用 YYYY-MM-DD 格式\n例如：2024-12-25"
     
     elif session.step == 2:
+        # 接收退房時間
+        try:
+            # 檢查日期格式
+            checkout_date = datetime.strptime(message_text, '%Y-%m-%d')
+            checkin_date = datetime.strptime(session.checkin_date, '%Y-%m-%d')
+            
+            # 檢查退房日期必須晚於入住日期
+            if checkout_date <= checkin_date:
+                reply_message = "⚠️ 退房日期必須晚於入住日期，請重新輸入："
+            else:
+                session.checkout_date = message_text
+                nights = (checkout_date - checkin_date).days
+                session.step = 3
+                reply_message = f"✅ 已設定退房時間：{message_text}\n📊 住宿天數：{nights} 晚\n\n👥 請輸入住宿人數："
+        except ValueError:
+            reply_message = "❌ 日期格式錯誤，請使用 YYYY-MM-DD 格式\n例如：2024-12-27"
+    
+    elif session.step == 3:
         # 接收人數
         try:
             guests = int(message_text)
             if guests > 0 and guests <= 10:
                 session.guests = guests
-                session.step = 3
+                session.step = 4
                 reply_message = f"✅ 已設定人數：{guests} 人\n\n🛏️ 請輸入指定的房型名稱\n例如：標準雙人房、豪華套房"
             else:
                 reply_message = "⚠️ 人數請輸入 1-10 之間的數字："
         except ValueError:
             reply_message = "❌ 請輸入有效的數字（1-10）："
     
-    elif session.step == 3:
+    elif session.step == 4:
         # 接收房型名稱並完成設定
         session.room_type = message_text
+        
+        # 計算住宿天數
+        nights = calculate_nights(session.checkin_date, session.checkout_date)
         
         # 儲存到資料庫
         save_booking(
             user_id,
             session.hotel_url,
             session.checkin_date,
-            None,  # checkout_date 暫時設為 None
+            session.checkout_date,
             session.guests,
             session.room_type
         )
@@ -260,8 +323,10 @@ def handle_message(event):
         reply_message = f"""
 ✅ 空房查詢設定完成！
 
-🏨 飯店網址：{session.hotel_url[:50]}...
+🏨 飯店：{get_hotel_name_from_url(session.hotel_url)}
 📅 入住時間：{session.checkin_date}
+📅 退房時間：{session.checkout_date}
+🌙 住宿天數：{nights} 晚
 👥 住宿人數：{session.guests} 人
 🛏️ 房型：{session.room_type}
 
@@ -284,24 +349,28 @@ def check_all_bookings():
     for booking in bookings:
         booking_id, user_id, hotel_url, checkin_date, checkout_date, guests, room_type, is_active, created_at = booking
         
-        logger.info(f"檢查預訂 {booking_id}: {room_type}")
+        nights = calculate_nights(checkin_date, checkout_date)
+        logger.info(f"檢查預訂 {booking_id}: {room_type} ({nights}晚)")
         
         # 檢查空房
-        available, message = check_hotel_availability(hotel_url, checkin_date, guests, room_type)
+        available, message = check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, room_type)
         
         if available:
             # 發送通知
             notification_message = f"""
 🎉 好消息！找到空房了！
 
-🏨 飯店：{hotel_url[:50]}...
+🏨 飯店：{get_hotel_name_from_url(hotel_url)}
 📅 入住時間：{checkin_date}
+📅 退房時間：{checkout_date}
+🌙 住宿天數：{nights} 晚
 👥 人數：{guests} 人
 🛏️房型：{room_type}
 
 💬 {message}
 
 🚀 請盡快前往預訂！
+🔗 {hotel_url}
             """
             
             try:
