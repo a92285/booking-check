@@ -117,7 +117,7 @@ def check_hotel_availability(hotel_url, checkin_date, guests, room_type):
         time.sleep(2)  # 模擬網路請求時間
         
         # 30% 機率有空房 (用於測試)
-        has_availability = random.random() < 0.3
+        has_availability = True
         
         if has_availability:
             return True, f"找到空房：{room_type} 可預訂！"
