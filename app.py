@@ -62,5 +62,6 @@ def handle_message(event):
     )
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))  # 讀取 Railway 給的環境變數 PORT
     print("🚀 啟動 Flask 應用...")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=port)
