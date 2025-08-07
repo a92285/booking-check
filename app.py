@@ -587,8 +587,57 @@ def handle_message(event):
         
         logger.info(f"收到訊息: {message_text} from {user_id}")
         
+        # 處理系統指令
+        if message_text.lower() in ['取消', 'cancel', '重新開始', 'reset']:
+            user_states[user_id] = BookingSession(user_id)
+            reply_message = "✅ 已重新開始。\n\n🏨 飯店空房查詢服務\n\n請輸入飯店預訂網址："
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_message)]
+                    )
+                )
+            return
+            
+        elif message_text.lower() in ['幫助', 'help', '說明']:
+            reply_message = """🏨 飯店空房查詢 LINE Bot 使用說明 (v2.0)
+
+📝 設定查詢：
+1️⃣ 輸入飯店預訂網址 (支援 Booking.com 短網址)
+2️⃣ 輸入入住日期 (YYYY-MM-DD)
+3️⃣ 輸入退房日期 (YYYY-MM-DD)
+4️⃣ 輸入住宿人數
+5️⃣ 輸入房型名稱
+
+🔧 指令：
+• 開始 - 開始新的查詢設定
+• 查看 - 查看目前的監控項目
+• 取消 - 重新開始設定
+• 說明 - 顯示此說明
+• 測試 [網址] - 快速測試空房檢查
+
+⏰ 系統每30分鐘自動檢查空房，有空房時會立即通知您！
+
+📋 支援的網站：
+• Booking.com (包含短網址 Share-xxx)
+• 其他主要訂房網站
+
+💡 本版本使用優化的網頁解析技術，提高檢測準確度"""
+            
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_message)]
+                    )
+                )
+            return
+            
         # 處理測試指令
-        if message_text.startswith('測試 '):
+        elif message_text.startswith('測試 '):
             test_url = message_text[3:]  # 移除「測試 」前綴
             try:
                 available, message = check_hotel_availability(
@@ -597,7 +646,7 @@ def handle_message(event):
                 reply_message = f"🔍 測試結果:\n{'✅ 有空房' if available else '❌ 無空房'}\n📝 {message}"
             except Exception as e:
                 reply_message = f"❌ 測試失敗: {str(e)}"
-            """
+            
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 line_bot_api.reply_message_with_http_info(
@@ -758,8 +807,7 @@ def handle_message(event):
             # 重置會話
             user_states[user_id] = BookingSession(user_id)
             
-            reply_message = f"""
-✅ 空房查詢設定完成！
+            reply_message = f"""✅ 空房查詢設定完成！
 
 🏨 飯店：{session.hotel_name or "訂房網站飯店"}
 📅 入住時間：{session.checkin_date}
@@ -777,8 +825,7 @@ def handle_message(event):
 • 說明 - 使用說明
 • 測試 [網址] - 快速測試
 
-🌟 優化版本 v2.0 - 提高檢測準確度
-            """
+🌟 優化版本 v2.0 - 提高檢測準確度"""
         
         else:
             # 未知狀態，重置
@@ -832,8 +879,7 @@ def check_all_bookings():
             
             if available:
                 # 發送通知
-                notification_message = f"""
-🎉 好消息！找到空房了！
+                notification_message = f"""🎉 好消息！找到空房了！
 
 🏨 飯店：{hotel_name}
 📅 入住時間：{checkin_date}
@@ -847,8 +893,7 @@ def check_all_bookings():
 🚀 請盡快前往預訂！
 🔗 {hotel_url}
 
-⏰ 檢查時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                """
+⏰ 檢查時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
                 
                 try:
                     with ApiClient(configuration) as api_client:
@@ -921,43 +966,3 @@ if __name__ == "__main__":
     print("🚀 啟動 Flask 應用... (優化版本 v2.0)")
     port = int(os.environ.get("PORT", 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
-        
-        # 處理系統指令
-        if message_text.lower() in ['取消', 'cancel', '重新開始', 'reset']:
-            user_states[user_id] = BookingSession(user_id)
-            reply_message = "✅ 已重新開始。\n\n🏨 飯店空房查詢服務\n\n請輸入飯店預訂網址："
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message_with_http_info(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply_message)]
-                    )
-                )
-            return
-            
-        elif message_text.lower() in ['幫助', 'help', '說明']:
-            reply_message = """
-🏨 飯店空房查詢 LINE Bot 使用說明 (v2.0)
-
-📝 設定查詢：
-1️⃣ 輸入飯店預訂網址 (支援 Booking.com 短網址)
-2️⃣ 輸入入住日期 (YYYY-MM-DD)
-3️⃣ 輸入退房日期 (YYYY-MM-DD)
-4️⃣ 輸入住宿人數
-5️⃣ 輸入房型名稱
-
-🔧 指令：
-• 開始 - 開始新的查詢設定
-• 查看 - 查看目前的監控項目
-• 取消 - 重新開始設定
-• 說明 - 顯示此說明
-• 測試 [網址] - 快速測試空房檢查
-
-⏰ 系統每30分鐘自動檢查空房，有空房時會立即通知您！
-
-📋 支援的網站：
-• Booking.com (包含短網址 Share-xxx)
-• 其他主要訂房網站
-
-💡 本版本使用優化的網頁解析技術，提高檢測準確度
