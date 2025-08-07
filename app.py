@@ -15,6 +15,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage
 )
 from linebot.v3.webhooks import (
@@ -30,6 +31,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import re
 from urllib.parse import urlparse, parse_qs, unquote
@@ -54,26 +56,73 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 app = Flask(__name__)
 
-# Selenium 設定
+# Selenium 設定 - 針對Railway雲端環境優化
 def create_webdriver():
-    """建立 Chrome WebDriver"""
+    """建立 Chrome WebDriver - 針對Railway雲端環境"""
     chrome_options = Options()
-    chrome_options.add_argument('--headless')  # 無頭模式
+    
+    # 雲端環境必需的參數
+    chrome_options.add_argument('--headless=new')  # 使用新的headless模式
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-plugins')
+    chrome_options.add_argument('--disable-images')
+    chrome_options.add_argument('--disable-javascript')  # 可以提高速度，但可能影響某些網站
     chrome_options.add_argument('--window-size=1920,1080')
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Linux; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    chrome_options.add_argument('--remote-debugging-port=9222')
+    chrome_options.add_argument('--disable-background-timer-throttling')
+    chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+    chrome_options.add_argument('--disable-renderer-backgrounding')
+    chrome_options.add_argument('--disable-features=TranslateUI')
+    chrome_options.add_argument('--disable-web-security')
+    chrome_options.add_argument('--allow-running-insecure-content')
     
-    # 如果在 Heroku 或其他雲端服務上，可能需要設定 ChromeDriver 路徑
-    # chrome_options.binary_location = os.environ.get("GOOGLE_CHROME_BIN")
+    # 設置頁面載入策略
+    chrome_options.page_load_strategy = 'eager'  # 不等待所有資源載入完成
+    
+    # Railway特定設定
+    chrome_binary = os.environ.get("GOOGLE_CHROME_BIN")
+    if chrome_binary:
+        chrome_options.binary_location = chrome_binary
+        logger.info(f"使用Chrome binary: {chrome_binary}")
+    
+    # ChromeDriver路徑設定
+    chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
     
     try:
-        driver = webdriver.Chrome(options=chrome_options)
+        if chromedriver_path and os.path.exists(chromedriver_path):
+            logger.info(f"使用指定的ChromeDriver路徑: {chromedriver_path}")
+            service = Service(executable_path=chromedriver_path)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            # 嘗試使用系統中的chromedriver
+            logger.info("嘗試使用系統ChromeDriver")
+            driver = webdriver.Chrome(options=chrome_options)
+        
+        # 設置超時時間
+        driver.set_page_load_timeout(30)
+        driver.implicitly_wait(10)
+        
+        logger.info("WebDriver 創建成功")
         return driver
+        
     except Exception as e:
         logger.error(f"無法建立 WebDriver: {e}")
-        return None
+        
+        # 如果還是失敗，嘗試不使用Service
+        try:
+            logger.info("嘗試使用默認ChromeDriver設定")
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.set_page_load_timeout(30)
+            driver.implicitly_wait(10)
+            logger.info("使用默認設定成功創建WebDriver")
+            return driver
+        except Exception as e2:
+            logger.error(f"使用默認設定也失敗: {e2}")
+            return None
 
 # 資料庫初始化
 def init_db():
@@ -122,18 +171,19 @@ def resolve_short_url(short_url):
         # 設定 requests session
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Linux; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         
         # 跟隨重定向但不下載內容
-        response = session.head(short_url, allow_redirects=True, timeout=10)
+        response = session.head(short_url, allow_redirects=True, timeout=15)
+        logger.info(f"短網址 {short_url} 解析為: {response.url}")
         return response.url
     except Exception as e:
         logger.error(f"無法解析短網址 {short_url}: {e}")
         return short_url
 
 def get_hotel_info_from_url(url):
-    """從網址獲取飯店資訊"""
+    """從網址獲取飯店資訊 - 簡化版本適合雲端環境"""
     driver = None
     try:
         # 如果是短網址，先解析
@@ -144,96 +194,68 @@ def get_hotel_info_from_url(url):
         else:
             full_url = url
         
+        # 嘗試從URL中提取飯店名稱（備用方案）
+        hotel_name_from_url = "Booking.com 飯店"
+        if 'booking.com' in full_url:
+            # 嘗試從URL參數或路徑中提取信息
+            parsed = urlparse(full_url)
+            if '/hotel/' in parsed.path:
+                path_parts = parsed.path.split('/hotel/')
+                if len(path_parts) > 1:
+                    hotel_part = path_parts[1].split('.')[0]
+                    hotel_name_from_url = hotel_part.replace('-', ' ').title()[:50]
+        
         driver = create_webdriver()
         if not driver:
-            return "未知飯店", full_url
+            logger.warning("無法創建WebDriver，使用URL解析結果")
+            return hotel_name_from_url, full_url
         
         logger.info(f"正在獲取飯店資訊: {full_url}")
-        driver.get(full_url)
-        
-        # 等待頁面載入
-        wait = WebDriverWait(driver, 15)
-        
-        # 嘗試多種方式獲取飯店名稱
-        hotel_name = "未知飯店"
         
         try:
-            # 方法1: 尋找標題中的飯店名稱
-            title_element = wait.until(EC.presence_of_element_located((By.TAG_NAME, "title")))
-            title_text = title_element.get_attribute("innerHTML")
-            if title_text and len(title_text) > 5:
-                # 清理標題文本
-                hotel_name = re.sub(r'\s*-.*$', '', title_text)  # 移除 " - Booking.com" 等後綴
-                hotel_name = re.sub(r'預訂.*', '', hotel_name)  # 移除中文預訂文字
-                hotel_name = hotel_name.strip()
-                if len(hotel_name) > 3:
-                    return hotel_name[:50], full_url
-        except:
-            pass
-        
-        try:
-            # 方法2: 尋找 h1 標籤
-            h1_selectors = [
-                "h1[data-testid='title']",
-                "h1.pp-header__title",
-                "h1#hp_hotel_name",
-                "h1",
-                ".pp-header__title"
-            ]
+            driver.get(full_url)
             
-            for selector in h1_selectors:
-                try:
-                    element = driver.find_element(By.CSS_SELECTOR, selector)
-                    text = element.text.strip()
-                    if text and len(text) > 3:
-                        hotel_name = text[:50]
-                        break
-                except:
-                    continue
-                    
-        except:
-            pass
-        
-        try:
-            # 方法3: 從頁面中尋找其他可能的飯店名稱元素
-            selectors = [
-                "[data-testid='title']",
-                ".hp__hotel-name",
-                ".property-name",
-                ".hotel-name"
-            ]
+            # 減少等待時間，提高效率
+            wait = WebDriverWait(driver, 10)
+            time.sleep(3)  # 減少等待時間
             
-            for selector in selectors:
-                try:
-                    element = driver.find_element(By.CSS_SELECTOR, selector)
-                    text = element.text.strip()
-                    if text and len(text) > 3:
-                        hotel_name = text[:50]
-                        break
-                except:
-                    continue
-                    
-        except:
-            pass
-        
-        # 如果還是沒找到，從 URL 嘗試提取
-        if hotel_name == "未知飯店":
+            # 嘗試獲取飯店名稱
+            hotel_name = hotel_name_from_url  # 默認值
+            
             try:
-                parsed_url = urlparse(full_url)
-                if 'booking.com' in parsed_url.netloc:
-                    hotel_name = "Booking.com 飯店"
-                else:
-                    domain = parsed_url.netloc.replace('www.', '')
-                    hotel_name = f"{domain} 飯店"
+                # 方法1: 尋找標題
+                title_text = driver.title
+                if title_text and len(title_text) > 5:
+                    # 清理標題文本
+                    cleaned_title = re.sub(r'\s*-.*$', '', title_text)
+                    cleaned_title = re.sub(r'預訂.*', '', cleaned_title)
+                    cleaned_title = cleaned_title.strip()
+                    if len(cleaned_title) > 3:
+                        hotel_name = cleaned_title[:50]
             except:
-                hotel_name = "未知飯店"
-        
-        logger.info(f"找到飯店名稱: {hotel_name}")
-        return hotel_name, full_url
+                pass
+            
+            try:
+                # 方法2: 尋找 h1 標籤 (簡化選擇器)
+                h1_elements = driver.find_elements(By.TAG_NAME, "h1")
+                for h1 in h1_elements[:3]:  # 只檢查前3個h1元素
+                    text = h1.text.strip()
+                    if text and len(text) > 3 and len(text) < 100:
+                        hotel_name = text[:50]
+                        break
+            except:
+                pass
+            
+            logger.info(f"找到飯店名稱: {hotel_name}")
+            return hotel_name, full_url
+            
+        except Exception as e:
+            logger.error(f"獲取頁面內容時發生錯誤: {e}")
+            return hotel_name_from_url, full_url
         
     except Exception as e:
         logger.error(f"獲取飯店資訊時發生錯誤: {e}")
-        return "未知飯店", url
+        return "Booking.com 飯店", url
     finally:
         if driver:
             try:
@@ -291,7 +313,7 @@ def calculate_nights(checkin_date, checkout_date):
         return 0
 
 def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, room_type):
-    """檢查飯店空房狀況"""
+    """檢查飯店空房狀況 - 簡化版本適合雲端環境"""
     driver = None
     try:
         logger.info(f"開始檢查空房: {hotel_url}")
@@ -307,17 +329,12 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
             return False, "無法啟動瀏覽器"
         
         # 構建帶有日期和人數的搜尋 URL
-        parsed_url = urlparse(full_url)
-        
-        # 轉換日期格式為 Booking.com 格式
         checkin_dt = datetime.strptime(checkin_date, '%Y-%m-%d')
         checkout_dt = datetime.strptime(checkout_date, '%Y-%m-%d')
         
-        # Booking.com 使用的日期格式
         checkin_str = checkin_dt.strftime('%Y-%m-%d')
         checkout_str = checkout_dt.strftime('%Y-%m-%d')
         
-        # 如果 URL 已經包含查詢參數，更新它們；否則添加
         if '?' in full_url:
             search_url = f"{full_url}&checkin={checkin_str}&checkout={checkout_str}&group_adults={guests}"
         else:
@@ -325,119 +342,62 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
         
         logger.info(f"搜尋網址: {search_url}")
         
-        driver.get(search_url)
-        
-        # 等待頁面載入
-        wait = WebDriverWait(driver, 20)
-        time.sleep(5)  # 額外等待時間讓頁面完全載入
-        
-        # 檢查是否有空房
-        availability_found = False
-        availability_message = "目前無空房"
-        
         try:
-            # 方法1: 尋找預訂按鈕或價格資訊
-            book_selectors = [
-                "[data-testid='availability-cta-btn']",
-                ".hprt-reservation-cta",
-                ".js-reservation-button",
-                "button[name='book']",
-                ".availability_form_button",
-                ".book_now_button"
-            ]
+            driver.get(search_url)
+            time.sleep(3)  # 減少等待時間
             
-            for selector in book_selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        # 檢查是否有可預訂的房間
-                        for element in elements:
-                            if element.is_displayed() and element.is_enabled():
-                                text = element.text.strip().lower()
-                                if any(word in text for word in ['預訂', 'book', 'reserve', '選擇', 'select']):
-                                    availability_found = True
-                                    availability_message = "找到可預訂房間！"
-                                    break
-                        if availability_found:
-                            break
-                except:
-                    continue
-        except:
-            pass
-        
-        try:
-            # 方法2: 檢查是否有價格顯示
-            price_selectors = [
-                ".priceview",
-                ".bui-price-display__value",
-                "[data-testid='price-and-discounted-price']",
-                ".hprt-price-price"
-            ]
+            # 簡化的可用性檢查
+            availability_found = False
+            availability_message = "目前無空房"
             
-            if not availability_found:
-                for selector in price_selectors:
+            # 檢查頁面標題和基本內容
+            try:
+                title = driver.title.lower()
+                if any(word in title for word in ['available', 'book', 'reserve', '可預訂']):
+                    availability_found = True
+                    availability_message = "找到可預訂選項"
+            except:
+                pass
+            
+            # 簡化的元素檢查
+            try:
+                # 尋找預訂相關按鈕或連結
+                book_elements = driver.find_elements(By.CSS_SELECTOR, 
+                    "button, a, input[type='submit']")
+                
+                for element in book_elements[:10]:  # 只檢查前10個元素
                     try:
-                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                        if elements:
-                            for element in elements:
-                                if element.is_displayed():
-                                    text = element.text.strip()
-                                    # 如果找到價格，表示有房間可訂
-                                    if re.search(r'[0-9]+', text):
-                                        availability_found = True
-                                        availability_message = f"找到空房，價格: {text}"
-                                        break
-                            if availability_found:
+                        text = element.text.strip().lower()
+                        if any(word in text for word in ['book', 'reserve', 'select', '預訂', '選擇', '立即']):
+                            if element.is_displayed() and element.is_enabled():
+                                availability_found = True
+                                availability_message = "找到可預訂房間"
                                 break
                     except:
                         continue
-        except:
-            pass
-        
-        try:
-            # 方法3: 檢查是否有"無空房"的訊息
-            no_availability_selectors = [
-                ".soldout_property",
-                ".no_availability",
-                "[data-testid='soldout-property']"
-            ]
-            
-            for selector in no_availability_selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements and any(el.is_displayed() for el in elements):
-                        availability_found = False
-                        availability_message = "飯店顯示無空房"
-                        break
-                except:
-                    continue
-        except:
-            pass
-        
-        # 如果還是無法確定，檢查頁面是否正常載入
-        if not availability_found:
-            try:
-                # 檢查頁面是否有載入錯誤
-                error_elements = driver.find_elements(By.CSS_SELECTOR, ".error, .not-found, .404")
-                if error_elements and any(el.is_displayed() for el in error_elements):
-                    return False, "頁面載入錯誤"
-                
-                # 如果頁面正常但沒找到明確的可用性資訊
-                title = driver.title
-                if "booking" in title.lower():
-                    availability_message = "無法確定空房狀況，請手動檢查"
-                else:
-                    availability_message = "頁面載入異常"
-                    
             except:
                 pass
-        
-        nights = calculate_nights(checkin_date, checkout_date)
-        final_message = f"{availability_message} ({nights}晚住宿)"
-        
-        logger.info(f"檢查結果: {'有空房' if availability_found else '無空房'} - {final_message}")
-        
-        return availability_found, final_message
+            
+            # 檢查是否有錯誤頁面
+            try:
+                page_source = driver.page_source.lower()
+                if any(word in page_source for word in ['no availability', 'sold out', '無空房', '已滿房']):
+                    availability_found = False
+                    availability_message = "確認無空房"
+            except:
+                pass
+            
+            nights = calculate_nights(checkin_date, checkout_date)
+            final_message = f"{availability_message} ({nights}晚住宿)"
+            
+            logger.info(f"檢查結果: {'有空房' if availability_found else '無空房'} - {final_message}")
+            
+            return availability_found, final_message
+            
+        except Exception as e:
+            logger.error(f"頁面處理錯誤: {e}")
+            nights = calculate_nights(checkin_date, checkout_date)
+            return False, f"檢查失敗: 頁面載入問題 ({nights}晚住宿)"
         
     except Exception as e:
         logger.error(f"檢查空房時發生錯誤: {e}")
@@ -593,13 +553,15 @@ def handle_message(event):
                 session.hotel_url = full_url  # 更新為完整 URL
                 session.step = 1
                 
-                # 發送飯店資訊和下一步指示
+                # 發送飯店資訊和下一步指示 - 修正API調用
                 follow_up_message = f"✅ 已收到飯店資訊：{hotel_name}\n\n📅 請輸入入住時間（格式：YYYY-MM-DD）\n例如：2024-12-25"
                 with ApiClient(configuration) as api_client:
                     line_bot_api = MessagingApi(api_client)
-                    line_bot_api.push_message_with_http_info(
-                        request={"to": user_id, "messages": [TextMessage(text=follow_up_message)]}
+                    push_request = PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=follow_up_message)]
                     )
+                    line_bot_api.push_message_with_http_info(push_request)
                 return
             else:
                 reply_message = "🏨 歡迎使用飯店空房查詢服務！\n\n請輸入飯店預訂網址 (需包含 http)，或輸入「說明」查看使用指南\n\n支援格式:\n• https://www.booking.com/Share-xxx\n• 其他訂房網站完整網址"
@@ -761,9 +723,11 @@ def check_all_bookings():
                 try:
                     with ApiClient(configuration) as api_client:
                         line_bot_api = MessagingApi(api_client)
-                        line_bot_api.push_message_with_http_info(
-                            request={"to": user_id, "messages": [TextMessage(text=notification_message)]}
+                        push_request = PushMessageRequest(
+                            to=user_id,
+                            messages=[TextMessage(text=notification_message)]
                         )
+                        line_bot_api.push_message_with_http_info(push_request)
                     
                     # 將此預訂標記為非活躍（已通知）
                     conn = sqlite3.connect('hotel_bookings.db')
@@ -778,7 +742,7 @@ def check_all_bookings():
                     logger.error(f"發送通知失敗: {e}")
             
             # 在檢查之間稍作停頓，避免過於頻繁的請求
-            time.sleep(10)
+            time.sleep(15)  # 增加間隔時間，減輕服務器負擔
             
         except Exception as e:
             logger.error(f"檢查預訂 {booking_id if 'booking_id' in locals() else 'unknown'} 時發生錯誤: {e}")
@@ -789,14 +753,30 @@ def start_scheduler():
     # 每30分鐘檢查一次
     schedule.every(30).minutes.do(check_all_bookings)
     
-    # 測試用：每5分鐘檢查一次（上線前請改回30分鐘）
-    # schedule.every(5).minutes.do(check_all_bookings)
+    # 測試用：每10分鐘檢查一次（上線前請改回30分鐘）
+    # schedule.every(10).minutes.do(check_all_bookings)
     
     logger.info("定時檢查器已啟動 - 每30分鐘檢查一次空房")
     
     while True:
         schedule.run_pending()
         time.sleep(60)
+
+# 添加測試WebDriver的路由
+@app.route("/test-webdriver", methods=['GET'])
+def test_webdriver():
+    """測試WebDriver是否正常工作"""
+    try:
+        driver = create_webdriver()
+        if driver:
+            driver.get("https://www.google.com")
+            title = driver.title
+            driver.quit()
+            return f"✅ WebDriver 測試成功！頁面標題: {title}"
+        else:
+            return "❌ WebDriver 創建失敗"
+    except Exception as e:
+        return f"❌ WebDriver 測試失敗: {str(e)}"
 
 if __name__ == "__main__":
     # 初始化資料庫
@@ -810,9 +790,10 @@ if __name__ == "__main__":
             test_driver.quit()
             print("✅ WebDriver 測試成功")
         else:
-            print("⚠️ WebDriver 初始化失敗，請檢查 Chrome 和 ChromeDriver 安裝")
+            print("⚠️ WebDriver 初始化失敗，但程序將繼續運行")
     except Exception as e:
         print(f"⚠️ WebDriver 測試失敗: {e}")
+        print("程序將繼續運行，但網頁爬取功能可能受限")
     
     # 在背景執行定時檢查
     scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
