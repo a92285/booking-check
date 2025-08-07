@@ -4,9 +4,23 @@ import schedule
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.v3 import (
+    WebhookHandler
+)
+from linebot.v3.exceptions import (
+    InvalidSignatureError
+)
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    ReplyMessageRequest,
+    TextMessage
+)
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent
+)
 import sqlite3
 import threading
 import logging
@@ -27,7 +41,7 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     print("❌ 請設定 LINE_CHANNEL_ACCESS_TOKEN 和 LINE_CHANNEL_SECRET")
     exit(1)
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 app = Flask(__name__)
@@ -133,6 +147,8 @@ def get_hotel_name_from_url(url):
     except:
         # 如果解析失敗，返回截斷的 URL
         return url[:35] + "..." if len(url) > 35 else url
+
+def calculate_nights(checkin_date, checkout_date):
     """計算住宿天數"""
     try:
         checkin = datetime.strptime(checkin_date, '%Y-%m-%d')
@@ -185,7 +201,7 @@ def callback():
 
     return 'OK'
 
-@handler.add(MessageEvent, message=TextMessage)
+@handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     try:
         user_id = event.source.user_id
@@ -197,7 +213,14 @@ def handle_message(event):
         if message_text.lower() in ['取消', 'cancel', '重新開始', 'reset']:
             user_states[user_id] = BookingSession(user_id)
             reply_message = "✅ 已重新開始。\n\n🏨 飯店空房查詢服務\n\n請輸入飯店預訂網址："
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_message)]
+                    )
+                )
             return
             
         elif message_text.lower() in ['幫助', 'help', '說明']:
@@ -219,7 +242,14 @@ def handle_message(event):
 
 ⏰ 系統每30分鐘自動檢查空房，有空房時會立即通知您！
             """
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_message)]
+                    )
+                )
             return
             
         elif message_text.lower() in ['查看', 'list', '我的查詢']:
@@ -237,7 +267,14 @@ def handle_message(event):
                     reply_message += f"   👥 {guests}人 | 🛏️ {room_type}\n\n"
                 reply_message += "輸入「開始」設定新的查詢"
             
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_message)]
+                    )
+                )
             return
 
         # 初始化用戶狀態
@@ -350,13 +387,28 @@ def handle_message(event):
             user_states[user_id] = BookingSession(user_id)
             reply_message = "🏨 歡迎使用飯店空房查詢服務！\n\n請輸入飯店預訂網址，或輸入「說明」查看使用指南"
         
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
+        # 發送回覆訊息
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply_message)]
+                )
+            )
         
     except Exception as e:
         logger.error(f"處理訊息時發生錯誤: {e}")
         try:
             error_message = "❌ 處理訊息時發生錯誤，請輸入「重新開始」重新設定"
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=error_message))
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=error_message)]
+                    )
+                )
         except:
             pass
 
@@ -393,7 +445,11 @@ def check_all_bookings():
             """
             
             try:
-                line_bot_api.push_message(user_id, TextSendMessage(text=notification_message))
+                with ApiClient(configuration) as api_client:
+                    line_bot_api = MessagingApi(api_client)
+                    line_bot_api.push_message_with_http_info(
+                        request={"to": user_id, "messages": [TextMessage(text=notification_message)]}
+                    )
                 
                 # 將此預訂標記為非活躍（已通知）
                 conn = sqlite3.connect('hotel_bookings.db')
