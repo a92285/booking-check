@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import re
 from urllib.parse import urlparse, parse_qs, unquote
+import urllib.parse
 
 # 設置日誌
 logging.basicConfig(level=logging.INFO)
@@ -95,16 +96,19 @@ def create_session():
     """創建HTTP會話，設置適當的headers"""
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Linux; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8,zh-CN;q=0.7',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
         'Sec-Fetch-Dest': 'document',
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0'
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'DNT': '1'
     })
     return session
 
@@ -145,8 +149,29 @@ def get_hotel_info_from_url(url):
         
         # 使用 requests 獲取頁面
         session = create_session()
+        
+        # 添加延遲避免被檢測為機器人
+        time.sleep(2)
+        
+        # 添加 cookies 和 referer
+        session.cookies.update({
+            'bkng': '1',
+            'bkng_stt': '1'
+        })
+        
         response = session.get(full_url, timeout=15)
         response.raise_for_status()
+        
+        # 檢查是否被重定向到錯誤頁面
+        if 'javascript' in response.text.lower() and 'disabled' in response.text.lower():
+            logger.warning("檢測到 JavaScript 錯誤頁面，重試中...")
+            # 重試一次，使用不同的 headers
+            time.sleep(3)
+            session.headers.update({
+                'Referer': 'https://www.booking.com/',
+                'Origin': 'https://www.booking.com'
+            })
+            response = session.get(full_url, timeout=15)
         
         # 使用 BeautifulSoup 解析 HTML
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -320,25 +345,45 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
             'Referer': 'https://www.booking.com/'
         })
         
+        # 添加延遲
+        time.sleep(3)
+        
         response = session.get(search_url, timeout=20)
         response.raise_for_status()
         
         # 使用 BeautifulSoup 解析 HTML
         soup = BeautifulSoup(response.content, 'html.parser')
         
+        # 獲取頁面文字內容
+        page_text = soup.get_text().lower()
+        
+        # 添加詳細日志用於調試
+        page_title = soup.title.get_text() if soup.title else '無標題'
+        logger.info(f"頁面標題: {page_title}")
+        logger.info(f"頁面長度: {len(page_text)} 字符")
+        logger.info(f"頁面前150字符: {page_text[:150]}")
+        
+        # 檢查頁面是否正常載入
+        if len(page_text) < 100:
+            logger.warning("頁面內容過短，可能載入失敗")
+            nights = calculate_nights(checkin_date, checkout_date)
+            return False, f"頁面載入異常 ({nights}晚住宿)"
+        
         # 檢查可用性
         availability_found = False
         availability_message = "目前無空房"
         
-        # 獲取頁面文字內容
-        page_text = soup.get_text().lower()
-        
-        # 檢查明確的可用性指標
+        # 檢查明確的可用性指標 - 擴充版本
         positive_indicators = [
             'book now', 'reserve now', 'available', 'select room', 'choose room',
             'book this room', 'reserve this room', 'check availability',
             '立即預訂', '現在預訂', '預訂', '可預訂', '選擇房間', '查看房間',
-            '預訂此房間', '立即預約', '馬上預訂', '可供預訂'
+            '預訂此房間', '立即預約', '馬上預訂', '可供預訂',
+            'availability', 'rooms left', 'rooms available', 'in stock',
+            'select', 'choose', 'reserve', 'confirm', 'proceed',
+            '有房', '剩餘', '可選', '確認', '繼續', '房間可訂',
+            'see availability', 'view rooms', 'show prices',
+            '查看價格', '顯示價格', '房價'
         ]
         
         negative_indicators = [
@@ -348,22 +393,32 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
             '無法預訂', '暫時無法預訂', '客滿'
         ]
         
-        # 首先檢查負面指標
+        # 檢查找到的關鍵詞
+        positive_words_found = []
+        negative_words_found = []
+        
+        for indicator in positive_indicators:
+            if indicator in page_text:
+                positive_words_found.append(indicator)
+        
         for indicator in negative_indicators:
             if indicator in page_text:
-                availability_found = False
-                availability_message = f"確認無空房: {indicator}"
-                break
-        else:
-            # 如果沒有負面指標，檢查正面指標
-            for indicator in positive_indicators:
-                if indicator in page_text:
-                    availability_found = True
-                    availability_message = f"找到可預訂選項: {indicator}"
-                    break
+                negative_words_found.append(indicator)
+        
+        logger.info(f"找到正面關鍵詞: {positive_words_found}")
+        logger.info(f"找到負面關鍵詞: {negative_words_found}")
+        
+        # 首先檢查負面指標
+        if negative_words_found:
+            availability_found = False
+            availability_message = f"確認無空房 (找到: {', '.join(negative_words_found[:2])})"
+        # 檢查正面指標
+        elif positive_words_found:
+            availability_found = True
+            availability_message = f"找到可預訂選項 (找到: {', '.join(positive_words_found[:2])})"
         
         # 檢查預訂按鈕或連結
-        if not availability_found:
+        if not availability_found and not negative_words_found:
             booking_selectors = [
                 'a[href*="book"]',
                 'button[data-testid*="book"]',
@@ -374,6 +429,7 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
                 'button[class*="reserve"]'
             ]
             
+            button_found = False
             for selector in booking_selectors:
                 elements = soup.select(selector)
                 for element in elements:
@@ -382,12 +438,13 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
                     if any(word in text for word in ['book', 'reserve', 'select', '預訂', '選擇']):
                         availability_found = True
                         availability_message = "找到預訂按鈕"
+                        button_found = True
                         break
-                if availability_found:
+                if button_found:
                     break
         
         # 檢查價格信息（通常表示有房間可訂）
-        if not availability_found:
+        if not availability_found and not negative_words_found:
             price_selectors = [
                 '[class*="price"]',
                 '[data-testid*="price"]',
@@ -396,6 +453,7 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
                 '[class*="rate"]'
             ]
             
+            price_found = False
             for selector in price_selectors:
                 elements = soup.select(selector)
                 for element in elements:
@@ -406,12 +464,13 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
                         if not re.search(r'(評分|評價|review|rating|km|公里)', text, re.IGNORECASE):
                             availability_found = True
                             availability_message = f"找到房間價格: {text[:30]}..."
+                            price_found = True
                             break
-                if availability_found:
+                if price_found:
                     break
         
         # 檢查房間選擇區域
-        if not availability_found:
+        if not availability_found and not negative_words_found:
             room_selectors = [
                 '.hprt-table',
                 '.roomstable',
@@ -430,13 +489,17 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
                         break
         
         # 如果仍然無法確定，檢查頁面標題和基本結構
-        if not availability_found and availability_message == "目前無空房":
+        if not availability_found and not negative_words_found and availability_message == "目前無空房":
             title = soup.title.get_text().lower() if soup.title else ""
             
             # 檢查頁面是否正常載入（不是錯誤頁面）
             if any(word in title for word in ['booking', 'hotel', '飯店']) and not any(word in title for word in ['error', '錯誤', '404']):
-                # 如果頁面正常載入但沒有明確指標，給出中性消息
-                availability_message = "頁面已載入，但無法確定空房狀況，建議手動檢查"
+                # 如果頁面正常載入但沒有明確指標，改為保守的正面回應
+                if len(page_text) > 1000:  # 頁面內容充足
+                    availability_found = True  # 改為 True，避免漏報
+                    availability_message = "頁面正常載入，建議手動確認空房狀況"
+                else:
+                    availability_message = "頁面載入不完整，無法確定空房狀況"
             elif any(error in page_text for error in ['error', '錯誤', '404', 'not found']):
                 availability_message = "頁面載入錯誤，無法檢查空房"
         
@@ -458,7 +521,7 @@ def check_hotel_availability(hotel_url, checkin_date, checkout_date, guests, roo
 
 @app.route("/", methods=['GET'])
 def home():
-    return "🏨 飯店空房查詢 LINE Bot 正在運行中... (使用 requests + BeautifulSoup 版本)"
+    return "🏨 飯店空房查詢 LINE Bot 正在運行中... (優化版本 v2.0)"
 
 @app.route("/test-connection", methods=['GET'])
 def test_connection():
@@ -477,6 +540,31 @@ def test_connection():
             return f"⚠️ 網路連線異常，狀態碼: {response.status_code}"
     except Exception as e:
         return f"❌ 連線測試失敗: {str(e)}"
+
+@app.route("/test-hotel", methods=['GET'])
+def test_hotel():
+    """測試飯店爬取功能"""
+    test_url = request.args.get('url', 'https://www.booking.com/Share-eOW41e')
+    try:
+        hotel_name, full_url = get_hotel_info_from_url(test_url)
+        return f"✅ 飯店名稱: {hotel_name}<br>🔗 完整網址: {full_url}"
+    except Exception as e:
+        return f"❌ 測試失敗: {str(e)}"
+
+@app.route("/test-availability", methods=['GET'])
+def test_availability():
+    """測試空房檢查功能"""
+    test_url = request.args.get('url', 'https://www.booking.com/Share-1NHUep')
+    checkin = request.args.get('checkin', '2025-10-10')
+    checkout = request.args.get('checkout', '2025-10-15')
+    guests = int(request.args.get('guests', '2'))
+    room_type = request.args.get('room_type', '豪華雙床間')
+    
+    try:
+        available, message = check_hotel_availability(test_url, checkin, checkout, guests, room_type)
+        return f"🔍 檢查結果: {'✅ 有空房' if available else '❌ 無空房'}<br>📝 詳細: {message}<br><br>🔗 測試網址: {test_url}"
+    except Exception as e:
+        return f"❌ 測試失敗: {str(e)}"
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -499,44 +587,16 @@ def handle_message(event):
         
         logger.info(f"收到訊息: {message_text} from {user_id}")
         
-        # 處理系統指令
-        if message_text.lower() in ['取消', 'cancel', '重新開始', 'reset']:
-            user_states[user_id] = BookingSession(user_id)
-            reply_message = "✅ 已重新開始。\n\n🏨 飯店空房查詢服務\n\n請輸入飯店預訂網址："
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message_with_http_info(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply_message)]
-                    )
+        # 處理測試指令
+        if message_text.startswith('測試 '):
+            test_url = message_text[3:]  # 移除「測試 」前綴
+            try:
+                available, message = check_hotel_availability(
+                    test_url, "2025-10-10", "2025-10-15", 2, "測試房型"
                 )
-            return
-            
-        elif message_text.lower() in ['幫助', 'help', '說明']:
-            reply_message = """
-🏨 飯店空房查詢 LINE Bot 使用說明
-
-📝 設定查詢：
-1️⃣ 輸入飯店預訂網址 (支援 Booking.com 短網址)
-2️⃣ 輸入入住日期 (YYYY-MM-DD)
-3️⃣ 輸入退房日期 (YYYY-MM-DD)
-4️⃣ 輸入住宿人數
-5️⃣ 輸入房型名稱
-
-🔧 指令：
-• 開始 - 開始新的查詢設定
-• 查看 - 查看目前的監控項目
-• 取消 - 重新開始設定
-• 說明 - 顯示此說明
-
-⏰ 系統每30分鐘自動檢查空房，有空房時會立即通知您！
-
-📋 支援的網站：
-• Booking.com (包含短網址 Share-xxx)
-• 其他主要訂房網站
-
-💡 本版本使用輕量級網頁解析技術，適合雲端環境運行
+                reply_message = f"🔍 測試結果:\n{'✅ 有空房' if available else '❌ 無空房'}\n📝 {message}"
+            except Exception as e:
+                reply_message = f"❌ 測試失敗: {str(e)}"
             """
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
@@ -629,7 +689,7 @@ def handle_message(event):
                     line_bot_api.push_message_with_http_info(push_request)
                 return
             else:
-                reply_message = "🏨 歡迎使用飯店空房查詢服務！\n\n請輸入飯店預訂網址 (需包含 http)，或輸入「說明」查看使用指南\n\n支援格式:\n• https://www.booking.com/Share-xxx\n• 其他訂房網站完整網址"
+                reply_message = "🏨 歡迎使用飯店空房查詢服務！\n\n請輸入飯店預訂網址 (需包含 http)，或輸入「說明」查看使用指南\n\n支援格式:\n• https://www.booking.com/Share-xxx\n• 其他訂房網站完整網址\n\n💡 快速測試：輸入「測試 [網址]」"
         
         elif session.step == 1:
             # 接收入住時間
@@ -715,8 +775,9 @@ def handle_message(event):
 • 查看 - 查看所有監控項目
 • 開始 - 設定新的查詢
 • 說明 - 使用說明
+• 測試 [網址] - 快速測試
 
-🌟 本系統使用輕量級技術，運行穩定
+🌟 優化版本 v2.0 - 提高檢測準確度
             """
         
         else:
@@ -854,9 +915,49 @@ if __name__ == "__main__":
     # 在背景執行定時檢查
     scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
     scheduler_thread.start()
-    print("✅ 背景檢查器已啟動 (使用 requests + BeautifulSoup)")
+    print("✅ 背景檢查器已啟動 (優化版本)")
     
     # 啟動 Flask 應用
-    print("🚀 啟動 Flask 應用... (無 Selenium 版本)")
+    print("🚀 啟動 Flask 應用... (優化版本 v2.0)")
     port = int(os.environ.get("PORT", 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
+        
+        # 處理系統指令
+        if message_text.lower() in ['取消', 'cancel', '重新開始', 'reset']:
+            user_states[user_id] = BookingSession(user_id)
+            reply_message = "✅ 已重新開始。\n\n🏨 飯店空房查詢服務\n\n請輸入飯店預訂網址："
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message_with_http_info(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_message)]
+                    )
+                )
+            return
+            
+        elif message_text.lower() in ['幫助', 'help', '說明']:
+            reply_message = """
+🏨 飯店空房查詢 LINE Bot 使用說明 (v2.0)
+
+📝 設定查詢：
+1️⃣ 輸入飯店預訂網址 (支援 Booking.com 短網址)
+2️⃣ 輸入入住日期 (YYYY-MM-DD)
+3️⃣ 輸入退房日期 (YYYY-MM-DD)
+4️⃣ 輸入住宿人數
+5️⃣ 輸入房型名稱
+
+🔧 指令：
+• 開始 - 開始新的查詢設定
+• 查看 - 查看目前的監控項目
+• 取消 - 重新開始設定
+• 說明 - 顯示此說明
+• 測試 [網址] - 快速測試空房檢查
+
+⏰ 系統每30分鐘自動檢查空房，有空房時會立即通知您！
+
+📋 支援的網站：
+• Booking.com (包含短網址 Share-xxx)
+• 其他主要訂房網站
+
+💡 本版本使用優化的網頁解析技術，提高檢測準確度
