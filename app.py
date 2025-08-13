@@ -48,6 +48,84 @@ def send_notification(user_id, checkin, checkout, adults, url):
     except Exception as e:
         print(f"發送通知失敗: {e}")
 
+def process_room_query_background(user_id, checkin_date, checkout_date, adults):
+    """背景處理房間查詢"""
+    try:
+        print(f"背景處理用戶 {user_id} 查詢房間：{checkin_date} 到 {checkout_date}，{adults}人")
+        result = room_checker.check_room_by_dates(checkin_date, checkout_date, adults)
+        
+        if result['available']:
+            # 已經有空房，立即通知
+            print(f"發現空房！立即通知用戶 {user_id}")
+            reply_text = f"""🎉 好消息！房間現在就有空！
+
+📅 入住日期：{checkin_date}
+📅 退房日期：{checkout_date}
+👥 入住人數：{adults}人
+
+🔗 立即預訂：
+{result['url']}
+
+✨ 趕快下訂吧！"""
+            
+            # 用 push_message 主動推送
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.push_message(
+                    PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=reply_text)]
+                    )
+                )
+        else:
+            # 沒有空房，開始監控
+            print(f"目前沒有空房，為用戶 {user_id} 開始監控")
+            monitoring_tasks[user_id] = {
+                'checkin': checkin_date,
+                'checkout': checkout_date,
+                'adults': adults,
+                'active': True
+            }
+            
+            reply_text = f"""❌ 目前沒有空房，但別擔心！
+
+📅 入住日期：{checkin_date}
+📅 退房日期：{checkout_date}
+👥 入住人數：{adults}人
+
+🔍 已開始自動監控
+⏰ 每30分鐘檢查一次
+📱 一有空房就立即通知您
+
+輸入「狀態」查看監控狀態
+輸入「停止」取消監控"""
+            
+            # 用 push_message 主動推送
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.push_message(
+                    PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=reply_text)]
+                    )
+                )
+                
+    except Exception as e:
+        print(f"背景處理房間查詢時發生錯誤: {e}")
+        # 如果查詢失敗，也要通知用戶
+        error_text = f"查詢房間時發生錯誤：{str(e)}\n請稍後再試或聯繫客服"
+        try:
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.push_message(
+                    PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=error_text)]
+                    )
+                )
+        except:
+            print(f"發送錯誤通知失敗")
+
 def monitor_rooms():
     """背景監控任務"""
     while True:
@@ -122,8 +200,19 @@ def handle_message(event):
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             
+            # 第一步：立即回覆「收到訊息，開始處理」
+            quick_reply = "✅ 收到訊息，開始處理中..."
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=quick_reply)]
+                )
+            )
+            
+            # 第二步：根據不同指令在背景處理
             if user_message.lower() in ['說明', 'help', '幫助']:
-                help_text = """📖 使用說明
+                def send_help():
+                    help_text = """📖 使用說明
 
 輸入格式：
 入住日期 退房日期 人數
@@ -135,19 +224,28 @@ def handle_message(event):
 • 狀態 - 查看監控狀態
 • 停止 - 停止監控
 • 說明 - 查看此說明"""
+                    
+                    try:
+                        with ApiClient(configuration) as api_client:
+                            line_bot_api = MessagingApi(api_client)
+                            line_bot_api.push_message(
+                                PushMessageRequest(
+                                    to=user_id,
+                                    messages=[TextMessage(text=help_text)]
+                                )
+                            )
+                    except Exception as e:
+                        print(f"發送說明失敗: {e}")
                 
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=help_text)]
-                    )
-                )
+                # 在背景執行
+                threading.Thread(target=send_help, daemon=True).start()
                 return
             
             if user_message == '狀態':
-                if user_id in monitoring_tasks and monitoring_tasks[user_id].get('active'):
-                    task = monitoring_tasks[user_id]
-                    status_text = f"""📊 監控狀態：運行中
+                def send_status():
+                    if user_id in monitoring_tasks and monitoring_tasks[user_id].get('active'):
+                        task = monitoring_tasks[user_id]
+                        status_text = f"""📊 監控狀態：運行中
 
 📅 入住日期：{task['checkin']}
 📅 退房日期：{task['checkout']}
@@ -155,33 +253,47 @@ def handle_message(event):
 
 ⏰ 每30分鐘檢查一次
 💡 輸入「停止」可取消監控"""
-                else:
-                    status_text = "目前沒有進行中的監控任務"
+                    else:
+                        status_text = "目前沒有進行中的監控任務"
+                    
+                    try:
+                        with ApiClient(configuration) as api_client:
+                            line_bot_api = MessagingApi(api_client)
+                            line_bot_api.push_message(
+                                PushMessageRequest(
+                                    to=user_id,
+                                    messages=[TextMessage(text=status_text)]
+                                )
+                            )
+                    except Exception as e:
+                        print(f"發送狀態失敗: {e}")
                 
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=status_text)]
-                    )
-                )
+                # 在背景執行
+                threading.Thread(target=send_status, daemon=True).start()
                 return
             
             if user_message == '停止':
-                if user_id in monitoring_tasks:
-                    monitoring_tasks[user_id]['active'] = False
-                    line_bot_api.reply_message(
-                        ReplyMessageRequest(
-                            reply_token=event.reply_token,
-                            messages=[TextMessage(text="✅ 監控已停止")]
-                        )
-                    )
-                else:
-                    line_bot_api.reply_message(
-                        ReplyMessageRequest(
-                            reply_token=event.reply_token,
-                            messages=[TextMessage(text="目前沒有進行中的監控任務")]
-                        )
-                    )
+                def stop_monitoring():
+                    if user_id in monitoring_tasks:
+                        monitoring_tasks[user_id]['active'] = False
+                        reply_text = "✅ 監控已停止"
+                    else:
+                        reply_text = "目前沒有進行中的監控任務"
+                    
+                    try:
+                        with ApiClient(configuration) as api_client:
+                            line_bot_api = MessagingApi(api_client)
+                            line_bot_api.push_message(
+                                PushMessageRequest(
+                                    to=user_id,
+                                    messages=[TextMessage(text=reply_text)]
+                                )
+                            )
+                    except Exception as e:
+                        print(f"發送停止通知失敗: {e}")
+                
+                # 在背景執行
+                threading.Thread(target=stop_monitoring, daemon=True).start()
                 return
             
             # 解析監控指令：入住日期 退房日期 人數
@@ -202,55 +314,17 @@ def handle_message(event):
                 if adults < 1 or adults > 10:
                     raise ValueError("人數必須在1-10之間")
                 
-                # 立即檢查一次當前狀態
-                print(f"用戶 {user_id} 查詢房間：{checkin_date} 到 {checkout_date}，{adults}人")
-                result = room_checker.check_room_by_dates(checkin_date, checkout_date, adults)
-                
-                if result['available']:
-                    # 已經有空房，直接通知
-                    print(f"發現空房！立即通知用戶 {user_id}")
-                    reply_text = f"""🎉 好消息！房間現在就有空！
-
-📅 入住日期：{checkin_date}
-📅 退房日期：{checkout_date}
-👥 入住人數：{adults}人
-
-🔗 立即預訂：
-{result['url']}
-
-✨ 趕快下訂吧！"""
-                else:
-                    # 沒有空房，開始監控
-                    print(f"目前沒有空房，為用戶 {user_id} 開始監控")
-                    monitoring_tasks[user_id] = {
-                        'checkin': checkin_date,
-                        'checkout': checkout_date,
-                        'adults': adults,
-                        'active': True
-                    }
-                    
-                    reply_text = f"""❌ 目前沒有空房，但別擔心！
-
-📅 入住日期：{checkin_date}
-📅 退房日期：{checkout_date}
-👥 入住人數：{adults}人
-
-🔍 已開始自動監控
-⏰ 每30分鐘檢查一次
-📱 一有空房就立即通知您
-
-輸入「狀態」查看監控狀態
-輸入「停止」取消監控"""
-                
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply_text)]
-                    )
+                # 在背景執行房間查詢
+                query_thread = threading.Thread(
+                    target=process_room_query_background, 
+                    args=(user_id, checkin_date, checkout_date, adults),
+                    daemon=True
                 )
+                query_thread.start()
                 
             except ValueError as e:
-                error_text = f"""❌ 輸入格式錯誤
+                def send_error():
+                    error_text = f"""❌ 輸入格式錯誤
 
 正確格式：
 入住日期 退房日期 人數
@@ -260,22 +334,39 @@ def handle_message(event):
 
 錯誤原因：{str(e)}
 輸入「說明」查看詳細使用方法"""
+                    
+                    try:
+                        with ApiClient(configuration) as api_client:
+                            line_bot_api = MessagingApi(api_client)
+                            line_bot_api.push_message(
+                                PushMessageRequest(
+                                    to=user_id,
+                                    messages=[TextMessage(text=error_text)]
+                                )
+                            )
+                    except Exception as e:
+                        print(f"發送錯誤訊息失敗: {e}")
                 
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=error_text)]
-                    )
-                )
+                # 在背景執行
+                threading.Thread(target=send_error, daemon=True).start()
             
             except Exception as e:
                 print(f"處理訊息時發生錯誤: {e}")
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=f"發生錯誤：{str(e)}")]
-                    )
-                )
+                def send_general_error():
+                    try:
+                        with ApiClient(configuration) as api_client:
+                            line_bot_api = MessagingApi(api_client)
+                            line_bot_api.push_message(
+                                PushMessageRequest(
+                                    to=user_id,
+                                    messages=[TextMessage(text=f"發生錯誤：{str(e)}")]
+                                )
+                            )
+                    except Exception as e:
+                        print(f"發送錯誤訊息失敗: {e}")
+                
+                # 在背景執行
+                threading.Thread(target=send_general_error, daemon=True).start()
     
     except Exception as e:
         print(f"handle_message 發生錯誤: {e}")
